@@ -206,6 +206,179 @@
             }
         }
 
+        if (window.location.protocol === "file:") {
+            console.log("Running from local file");
+
+            const gameVersion = '2'; // change as needed: '1', '2', '4', 'ucn', etc.
+
+            alert(
+                `Running locally. Please select the "unbfnaf" folder`
+            );
+
+            let dirPickerBtn = document.createElement('button');
+            dirPickerBtn.textContent = `Select unbfnaf folder`;
+            dirPickerBtn.style.position = 'absolute';
+            dirPickerBtn.style.top = '50%';
+            dirPickerBtn.style.left = '50%';
+            dirPickerBtn.style.transform = 'translate(-50%, -50%)';
+            dirPickerBtn.style.zIndex = 1000;
+            dirPickerBtn.style.fontSize = '1.5em';
+            dirPickerBtn.style.padding = '1em 2em';
+            document.body.appendChild(dirPickerBtn);
+
+            function getMissingParts(selectedFiles) {
+                const expected = [];
+                for (let i = 1; i <= 20; i++) {
+                    expected.push(`resources.zip.part${i}`);
+                }
+                const selectedNames = new Set(selectedFiles.map(f => f.name));
+                return expected.filter(name => !selectedNames.has(name));
+            }
+
+            dirPickerBtn.addEventListener('click', async () => {
+                if ('showDirectoryPicker' in window) {
+                    try {
+                        const unbfnafHandle = await window.showDirectoryPicker();
+                        const versionFolder = await unbfnafHandle.getDirectoryHandle(gameVersion, { create: false });
+                        const srcFolder = await versionFolder.getDirectoryHandle(`${gameVersion}_src`, { create: false });
+
+                        window.selectedResourceParts = [];
+                        for await (const [name, handle] of srcFolder.entries()) {
+                            if (/^resources\.zip\.part\d+$/.test(name)) {
+                                const file = await handle.getFile();
+                                window.selectedResourceParts.push(file);
+                            }
+                        }
+
+                        window.selectedResourceParts.sort((a, b) => {
+                            const aNum = parseInt(a.name.match(/part(\d+)$/)[1], 10);
+                            const bNum = parseInt(b.name.match(/part(\d+)$/)[1], 10);
+                            return aNum - bNum;
+                        });
+
+                        const missing = getMissingParts(window.selectedResourceParts);
+                        if (missing.length > 0) {
+                            alert(`Missing files in ${gameVersion}_src:\n` + missing.join('\n'));
+                            return;
+                        }
+                        if (window.selectedResourceParts.length !== 20) {
+                            alert(`Exactly 20 parts required. Found: ${window.selectedResourceParts.length}`);
+                            return;
+                        }
+
+                        console.log("Selected parts:", window.selectedResourceParts.map(f => f.name));
+                        dirPickerBtn.remove();
+
+                        await extractFromLocalFiles();
+                    } catch (e) {
+                        alert("Directory selection cancelled or failed.");
+                    }
+                } else {
+                    // Fallback for browsers without showDirectoryPicker
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.webkitdirectory = true;
+                    input.directory = true;
+                    input.multiple = true;
+                    input.style.display = 'none';
+                    document.body.appendChild(input);
+
+                    input.addEventListener('change', async () => {
+                        window.selectedResourceParts = Array.from(input.files).filter(
+                            f =>
+                                /^resources\.zip\.part\d+$/.test(f.name) &&
+                                f.webkitRelativePath.includes(`${gameVersion}/${gameVersion}_src/`)
+                        );
+
+                        window.selectedResourceParts.sort((a, b) => {
+                            const aNum = parseInt(a.name.match(/part(\d+)$/)[1], 10);
+                            const bNum = parseInt(b.name.match(/part(\d+)$/)[1], 10);
+                            return aNum - bNum;
+                        });
+
+                        const missing = getMissingParts(window.selectedResourceParts);
+                        if (missing.length > 0) {
+                            alert(`Missing files in ${gameVersion}_src:\n` + missing.join('\n'));
+                            return;
+                        }
+                        if (window.selectedResourceParts.length !== 20) {
+                            alert(`Exactly 20 parts required. Found: ${window.selectedResourceParts.length}`);
+                            return;
+                        }
+
+                        console.log("Selected parts:", window.selectedResourceParts.map(f => f.name));
+                        dirPickerBtn.remove();
+                        input.remove();
+
+                        await extractFromLocalFiles();
+                    });
+
+                    input.click();
+                }
+            });
+
+            async function extractFromLocalFiles() {
+                if (!window.selectedResourceParts || window.selectedResourceParts.length === 0) {
+                    alert("No resource parts selected!");
+                    return;
+                }
+
+                // Validate again
+                const missing = getMissingParts(window.selectedResourceParts);
+                if (missing.length > 0) {
+                    alert(`Missing files in ${gameVersion}_src:\n` + missing.join('\n'));
+                    return;
+                }
+                if (window.selectedResourceParts.length !== 20) {
+                    alert(`Exactly 20 parts required. Found: ${window.selectedResourceParts.length}`);
+                    return;
+                }
+
+                updateProgress('MERGING FILES...', 0);
+
+                const totalSize = window.selectedResourceParts.reduce((sum, file) => sum + file.size, 0);
+                let loadedSize = 0;
+                const chunks = [];
+
+                for (let i = 0; i < window.selectedResourceParts.length; i++) {
+                    const file = window.selectedResourceParts[i];
+                    const arrayBuffer = await file.arrayBuffer();
+                    chunks.push(arrayBuffer);
+                    loadedSize += arrayBuffer.byteLength;
+                    updateProgress('MERGING FILES...', Math.floor((loadedSize / totalSize / 2) * 100));
+                }
+
+                const mergedBlob = new Blob(chunks);
+                const zip = await JSZip.loadAsync(mergedBlob);
+                const files = Object.keys(zip.files).filter(name => !zip.files[name].dir);
+                const totalFiles = files.length;
+
+                for (let i = 0; i < totalFiles; i++) {
+                    const file = zip.files[files[i]];
+                    const blob = await file.async("blob");
+                    const url = URL.createObjectURL(blob);
+                    map.set(files[i], url);
+                    updateProgress('BOOTING UP ARCHIVE...', Math.floor(((i + 1) / totalFiles / 2) * 100 + 50));
+                }
+
+                await intercept();
+
+                const script = document.createElement('script');
+                script.src = `${gameVersion}_src/Runtime.js`;
+                script.onload = () => {
+                    new Runtime("MMFCanvas", runtimecanvas);
+                };
+
+                document.getElementById('MMFCanvas').style.display = 'block';
+                document.getElementById('selection').style.display = 'none';
+                document.title = gametitle;
+                document.head.appendChild(script);
+            }
+        }
+
+        if (window.location.protocol === "file:") {
+            return;
+        }
         async function extract() {
             const res = await fetch("resources.zip");
 
@@ -242,7 +415,7 @@
             await intercept();
 
             const script = document.createElement('script');
-            script.src = 'src/Runtime.js';
+            script.src = '2_src/Runtime.js';
             script.onload = () => {
                 new Runtime("MMFCanvas", runtimecanvas);
             };
@@ -300,7 +473,7 @@
             return parts;
         }
         Promise.all([
-            mergeFiles(getParts("src/resources.zip", 1, parts))
+            mergeFiles(getParts("2_src/resources.zip", 1, parts))
         ]).then(([resources]) => {
             window.fetch = async function (url, ...args) {
                 if (url.endsWith("resources.zip")) {
